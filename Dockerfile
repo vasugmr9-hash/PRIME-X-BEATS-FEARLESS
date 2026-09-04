@@ -18,11 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     npm \
     && rm -rf /var/lib/apt/lists/*
 
-# Deno is used by yt-dlp for YouTube JavaScript challenge solving.
+# Install Deno for yt-dlp JavaScript challenge solving
 RUN curl -fsSL https://deno.land/install.sh | sh \
     && ln -sf /root/.deno/bin/deno /usr/local/bin/deno
 
-# Build the BgUtils PO-token HTTP provider.
+# Build BgUtils PO-token provider
 RUN git clone --depth 1 --branch 1.3.2 \
     https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil \
     && cd /opt/bgutil/server \
@@ -30,14 +30,31 @@ RUN git clone --depth 1 --branch 1.3.2 \
     && npx tsc
 
 COPY requirements.txt /app/requirements.txt
+
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir -r /app/requirements.txt
-
-COPY start_bgutil.sh /app/start_bgutil.sh
-RUN chmod +x /app/start_bgutil.sh
 
 COPY . /app
 
 EXPOSE 10000
 
-CMD ["/app/start_bgutil.sh"]
+CMD ["sh", "-c", \
+"cd /opt/bgutil/server && \
+ node build/main.js > /tmp/bgutil.log 2>&1 & \
+ BGUTIL_PID=$!; \
+ echo '[startup] BgUtils starting...'; \
+ for i in $(seq 1 60); do \
+   if curl -fsS http://127.0.0.1:4416/ping >/dev/null 2>&1; then \
+     echo '[startup] BgUtils READY'; \
+     break; \
+   fi; \
+   sleep 1; \
+ done; \
+ if ! curl -fsS http://127.0.0.1:4416/ping >/dev/null 2>&1; then \
+   echo '[startup] ERROR: BgUtils did not start'; \
+   cat /tmp/bgutil.log || true; \
+   kill $BGUTIL_PID 2>/dev/null || true; \
+   exit 1; \
+ fi; \
+ echo '[startup] Starting PRIME x BEATS...'; \
+ exec python app.py"]
