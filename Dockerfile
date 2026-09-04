@@ -57,4 +57,4 @@ CMD ["sh", "-c", \
    exit 1; \
  fi; \
  echo '[startup] Starting PRIME x BEATS...'; \
- exec python app.py"]
+ exec python primebeats/app.py"]
