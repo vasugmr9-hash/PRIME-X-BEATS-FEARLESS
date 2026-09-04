@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
+    unzip \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/*
