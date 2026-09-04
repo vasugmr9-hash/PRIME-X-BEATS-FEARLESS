@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python -m pip install --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Deno for yt-dlp YouTube challenge solving
+# yt-dlp uses Deno for JavaScript challenge solving on YouTube.
 RUN curl -fsSL https://deno.land/install.sh | sh \
     && mv /root/.deno/bin/deno /usr/local/bin/deno \
     && deno --version
@@ -23,11 +23,12 @@ RUN curl -fsSL https://deno.land/install.sh | sh \
 WORKDIR /app
 
 COPY requirements.txt .
-
 RUN python -m pip install -r requirements.txt
 
 COPY . .
 
-EXPOSE 10000
+# Make sure the runtime used by yt-dlp is available in the final image.
+RUN yt-dlp --version && deno --version && ffmpeg -version | head -n 1
 
+EXPOSE 10000
 CMD ["python", "-m", "primebeats"]
