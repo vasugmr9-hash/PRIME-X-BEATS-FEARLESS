@@ -1,6 +1,6 @@
 pyrofork==2.3.69
 tgcrypto==1.2.5
 py-tgcalls==2.3.3
-yt-dlp>=2026.7.4,<2027
+yt-dlp[default]==2026.08.19
 aiohttp>=3.12,<4
 python-dotenv>=1.1,<2
