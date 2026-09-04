@@ -9,4 +9,3 @@ jobs:
         with:
           python-version: "3.12"
       - run: python tests/test_compile.py
-      
