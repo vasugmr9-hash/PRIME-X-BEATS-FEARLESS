@@ -681,7 +681,10 @@ async def _ytdlp_resolve(link_or_query: str, video: bool = False) -> dict:
         # A slightly longer budget is useful because EJS initialization can
         # take a few seconds on a cold Render instance.
         try:
-            result = await asyncio.wait_for(asyncio.to_thread(_extract), timeout=55)
+            result = await asyncio.wait_for(
+    asyncio.to_thread(_extract),
+    timeout=120
+            )
         except Exception as exc:
             # Optional last-resort Yuki API. This is only used when the user
             # has configured MEOW_API_KEY and a direct video ID is available.
