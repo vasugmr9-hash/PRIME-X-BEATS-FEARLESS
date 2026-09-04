@@ -19,11 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     npm \
     && rm -rf /var/lib/apt/lists/*
 
-# Modern yt-dlp uses a JavaScript runtime for current YouTube challenges.
+# JavaScript runtime required by modern yt-dlp
 RUN curl -fsSL https://deno.land/install.sh | sh \
     && ln -sf /root/.deno/bin/deno /usr/local/bin/deno
 
-# Build BgUtils PO-token provider.
+# BgUtils PO-token provider
 RUN git clone --depth 1 --branch 1.3.2 \
     https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil \
     && cd /opt/bgutil/server \
@@ -35,10 +35,20 @@ COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install -r /app/requirements.txt
 
-COPY . /app
+# Create PRIME x BEATS Python package
+RUN mkdir -p /app/primebeats
 
-# Catch Python syntax/import-file mistakes during the image build.
-RUN python -m py_compile /app/primebeats/app.py /app/primebeats/youtube.py
+# Copy all Python modules from repository root
+# into the primebeats package.
+COPY *.py /app/primebeats/
+
+# Mark it as a Python package
+RUN touch /app/primebeats/__init__.py
+
+# Verify required files and Python syntax
+RUN test -f /app/primebeats/app.py \
+    && test -f /app/primebeats/youtube.py \
+    && python -m py_compile /app/primebeats/*.py
 
 EXPOSE 10000
 
