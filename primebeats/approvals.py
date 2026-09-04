@@ -20,3 +20,4 @@ class ApprovalStore:
             self.data.discard(int(chat_id))
             self.path.write_text(json.dumps(sorted(self.data)))
     def is_approved(self, chat_id:int)->bool: return int(chat_id) in self.data
+        
