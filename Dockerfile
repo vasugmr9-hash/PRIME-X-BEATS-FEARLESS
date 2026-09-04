@@ -1,56 +1,26 @@
 FROM python:3.12-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PORT=10000 \
-    BGUTIL_POT_PROVIDER_URL=http://127.0.0.1:4416
-
-WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    python3-dev \
     ffmpeg \
     git \
     curl \
     ca-certificates \
-    unzip \
-    nodejs \
-    npm \
+    && python -m pip install --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
 
-# JavaScript runtime required by modern yt-dlp
-RUN curl -fsSL https://deno.land/install.sh | sh \
-    && ln -sf /root/.deno/bin/deno /usr/local/bin/deno \
-    && deno --version
+WORKDIR /app
 
-# BgUtils PO-token provider
-RUN git clone --depth 1 --branch 1.3.2 \
-    https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil \
-    && cd /opt/bgutil/server \
-    && npm ci \
-    && npx tsc
+COPY requirements.txt .
+RUN python -m pip install -r requirements.txt
 
-COPY requirements.txt /app/requirements.txt
-
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && python -m pip install -r /app/requirements.txt
-
-# Create PRIME x BEATS Python package
-RUN mkdir -p /app/primebeats
-
-# Copy all Python modules from repository root
-# into the primebeats package.
-COPY *.py /app/primebeats/
-
-# Mark it as a Python package
-RUN touch /app/primebeats/__init__.py
-
-# Verify required files and Python syntax
-RUN test -f /app/primebeats/app.py \
-    && test -f /app/primebeats/youtube.py \
-    && python -m py_compile /app/primebeats/*.py
+COPY . .
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "set -eu; cd /opt/bgutil/server; node build/main.js > /tmp/bgutil.log 2>&1 & BGUTIL_PID=$!; trap 'kill $BGUTIL_PID 2>/dev/null || true' EXIT TERM INT; echo '[startup] BgUtils starting...'; ready=0; for i in $(seq 1 60); do if curl -fsS http://127.0.0.1:4416/ping >/dev/null 2>&1; then ready=1; echo '[startup] BgUtils READY'; break; fi; sleep 1; done; if [ \"$ready\" -ne 1 ]; then echo '[startup] ERROR: BgUtils did not start'; cat /tmp/bgutil.log || true; exit 1; fi; echo '[startup] Deno:'; deno --version | head -n 1; echo '[startup] Node:'; node --version; echo '[startup] yt-dlp:'; python -c 'import yt_dlp; print(yt_dlp.version.__version__)'; echo '[startup] BgUtils ping: OK'; echo '[startup] Starting PRIME x BEATS...'; exec python -m primebeats.app"]
+CMD ["python", "-m", "primebeats"]
