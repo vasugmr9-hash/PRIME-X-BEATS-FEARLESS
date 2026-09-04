@@ -12,24 +12,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
-    unzip \
     nodejs \
     npm \
+    python3 \
+    libcairo2-dev \
+    libjpeg62-turbo-dev \
+    libpango1.0-dev \
+    libgif-dev \
+    librsvg2-dev \
     && python -m pip install --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Deno is the recommended JS runtime for yt-dlp's YouTube EJS challenge solving.
+# Deno is used by yt-dlp's EJS JavaScript challenge solver.
 RUN curl -fsSL https://deno.land/install.sh | sh \
     && mv /root/.deno/bin/deno /usr/local/bin/deno \
     && deno --version
 
-# Install the current BgUtils PO-token provider. yt-dlp's current guide
-# recommends a PO-token provider for clients that require GVS tokens.
-RUN git clone --depth 1 --branch 1.3.2 \
+# Build the official BgUtils PO-token HTTP provider with Node.js.
+# Node mode is the simplest native server mode and avoids the Deno/canvas
+# server startup path. The Python plugin is installed from the matching PyPI release.
+RUN git clone --single-branch --branch 1.3.2 \
       https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
       /opt/bgutil-ytdlp-pot-provider \
     && cd /opt/bgutil-ytdlp-pot-provider/server \
-    && deno install --allow-scripts=npm:canvas --frozen
+    && npm ci \
+    && npx tsc
 
 WORKDIR /app
 
@@ -38,9 +45,14 @@ RUN python -m pip install -r requirements.txt
 
 COPY . .
 
-# Start the local PO-token server, then the Telegram bot.
-RUN yt-dlp --version && deno --version && ffmpeg -version | head -n 1
+# Verify all critical components during the image build.
+RUN python -m yt_dlp --version \
+    && python -c "import bgutil_ytdlp_pot_provider; print('bgutil plugin: OK')" \
+    && node --version \
+    && deno --version \
+    && ffmpeg -version | head -n 1
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "cd /opt/bgutil-ytdlp-pot-provider/server && deno run --no-prompt --allow-env --allow-net --allow-ffi=. --allow-read=. --allow-sys src/main.ts --port 4416 & exec python -m primebeats"]
+# Start the local PO-token provider first, wait for /ping, then start PRIME × BEATS.
+CMD ["sh", "-c", "node /opt/bgutil-ytdlp-pot-provider/server/build/main.js --port 4416 > /tmp/bgutil.log 2>&1 & BGUTIL_PID=$!; for i in $(seq 1 30); do if curl -fsS http://127.0.0.1:4416/ping >/dev/null 2>&1; then echo '[bgutil] POT provider ready on 127.0.0.1:4416'; break; fi; if ! kill -0 $BGUTIL_PID 2>/dev/null; then echo '[bgutil] POT provider exited'; cat /tmp/bgutil.log; exit 1; fi; sleep 1; done; if ! curl -fsS http://127.0.0.1:4416/ping >/dev/null 2>&1; then echo '[bgutil] POT provider did not become ready'; cat /tmp/bgutil.log; exit 1; fi; exec python -m primebeats"]
