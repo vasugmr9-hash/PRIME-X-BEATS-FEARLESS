@@ -15,7 +15,7 @@ except Exception:
 
 API_URL = os.environ.get("MEOW_API_URL", "https://music.yukiapi.site")
 
-API_KEY = os.environ.get("MEOW_API_KEY", "").strip()
+API_KEY = os.environ.get("MEOW_API_KEY", "YOUR_API_KEY") ## Get This API KEY FROM TELEGRAM BOT USERNAME: @MeowApiRobot
 DOWNLOAD_DIR = "downloads"
 
 _global_session: aiohttp.ClientSession | None = None
@@ -283,15 +283,8 @@ async def download_media(video_id: str, is_video: bool = False) -> str:
                 if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 10000:
                     os.replace(tmp_path, out_path)
                     return out_path
-            elif resp.status in (401, 403):
-                raise RuntimeError(
-                    f"Yuki API rejected MEOW_API_KEY (HTTP {resp.status})"
-                )
-            else:
-                body = await resp.text(errors="ignore")
-                raise RuntimeError(
-                    f"Yuki API HTTP {resp.status}: {body[:300]}"
-                )
+            elif resp.status == 401:
+                raise RuntimeError("Invalid API_KEY. Please get a valid key from @MeowApiRobot")
     except Exception as e:
         print(f"[Yuki API] Stream error for {video_id}: {e}")
         raise
@@ -578,7 +571,7 @@ async def search_results(query: str, limit: int = 8) -> list[dict]:
 
 
 async def _ytdlp_resolve(link_or_query: str, video: bool = False) -> dict:
-    """Robust YouTube resolver for current yt-dlp/YouTube extraction changes."""
+    """Fast, bounded YouTube resolver. Uses yt-dlp directly and never waits indefinitely."""
     import yt_dlp
 
     target = str(link_or_query).strip()
@@ -588,88 +581,34 @@ async def _ytdlp_resolve(link_or_query: str, video: bool = False) -> dict:
     cookie_file = os.getenv("YOUTUBE_COOKIES_FILE", "")
 
     def _extract():
-        base_opts = {
-            "quiet": False,
-            "no_warnings": False,
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
             "noplaylist": True,
             "skip_download": True,
             "nocheckcertificate": True,
-            "extractor_retries": 3,
-            "retries": 3,
-            "fragment_retries": 3,
-            "socket_timeout": 20,
-            # Let yt-dlp use the installed JS runtime for current YouTube
-            # challenge solving. Do not force a client here.
-            "js_runtimes": {"deno": {}},
-            "remote_components": ["ejs:npm"],
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
         }
         if cookie_file and os.path.isfile(cookie_file):
-            base_opts["cookiefile"] = cookie_file
-
+            opts["cookiefile"] = cookie_file
         if video:
-            base_opts["format"] = (
-                "best[height<=720][ext=mp4][vcodec!=none][acodec!=none]/"
-                "best[height<=720][vcodec!=none][acodec!=none]/best"
-            )
+            opts["format"] = "best[height<=720][ext=mp4]/best[height<=720]/best"
         else:
-            base_opts["format"] = "ba[ext=m4a]/ba/bestaudio/best"
-
-        # Keep the first attempt on yt-dlp's maintained defaults. The fallbacks
-        # are deliberately isolated because YouTube can treat each client
-        # differently and a failing client should not poison the next attempt.
-        attempts = [
-            ("default+bgutil", None),
-            # mweb is the client for which yt-dlp recommends a PO-token
-            # provider when GVS requires attestation.
-            ("mweb+bgutil", ["mweb"]),
-            # web_safari can expose HLS formats that currently do not require
-            # a GVS PO token in many cases.
-            ("web_safari+bgutil", ["web_safari"]),
-            ("web_embedded", ["web_embedded"]),
-        ]
-        errors = []
-
-        for name, clients in attempts:
-            attempt_started = time.monotonic()
-            print(f"[yt-dlp] starting attempt={name} target={target!r}", flush=True)
-            local_opts = dict(base_opts)
-            local_opts["extractor_args"] = {
-                "youtubepot-bgutilhttp": {
-                    "base_url": os.getenv("BGUTIL_POT_PROVIDER_URL",
-                                           os.getenv("BGUTIL_POT_BASE_URL",
-                                                     "http://127.0.0.1:4416"))
-                }
+            opts["format"] = "bestaudio/best"
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(target, download=False)
+            if info and info.get("entries"):
+                info = next((x for x in info["entries"] if x), None)
+            if not info or not info.get("id") or not info.get("url"):
+                raise RuntimeError("yt-dlp could not resolve playable media")
+            return {
+                "id": info["id"],
+                "title": info.get("title") or "Unknown",
+                "link": info.get("webpage_url") or f"https://www.youtube.com/watch?v={info['id']}",
+                "duration": int(info.get("duration") or 0),
+                "thumbnails": [{"url": info.get("thumbnail") or f"https://i.ytimg.com/vi/{info['id']}/hqdefault.jpg"}],
+                "stream_url": info["url"],
             }
-            if clients:
-                local_opts["extractor_args"]["youtube"] = {"player_client": clients}
-
-            try:
-                with yt_dlp.YoutubeDL(local_opts) as ydl:
-                    info = ydl.extract_info(target, download=False)
-                    if info and info.get("entries"):
-                        info = next((x for x in info["entries"] if x), None)
-                    if not info or not info.get("id") or not info.get("url"):
-                        raise RuntimeError("yt-dlp returned no playable media")
-
-                    vid = info["id"]
-                    thumb = info.get("thumbnail") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
-                    return {
-                        "id": vid,
-                        "title": info.get("title") or "Unknown",
-                        "link": info.get("webpage_url") or f"https://www.youtube.com/watch?v={vid}",
-                        "duration": int(info.get("duration") or 0),
-                        "duration_string": info.get("duration_string") or "",
-                        "thumbnails": [{"url": thumb}],
-                        "stream_url": info["url"],
-                    }
-            except Exception as exc:
-                text = str(exc).strip().replace("\n", " ")
-                errors.append(f"{name}: {text[-500:]}")
-                print(f"[yt-dlp] failed attempt={name} elapsed={time.monotonic()-attempt_started:.1f}s error={text[-1000:]}", flush=True)
-            else:
-                print(f"[yt-dlp] success attempt={name} elapsed={time.monotonic()-attempt_started:.1f}s", flush=True)
-
-        raise RuntimeError("YouTube extraction failed | " + " || ".join(errors))
 
     key = (target.lower(), bool(video))
     cached = _RESOLVE_CACHE.get(key)
@@ -682,44 +621,7 @@ async def _ytdlp_resolve(link_or_query: str, video: bool = False) -> dict:
         now = time.monotonic()
         if cached and now - cached[0] < _RESOLVE_CACHE_TTL:
             return dict(cached[1])
-
-        # A slightly longer budget is useful because EJS initialization can
-        # take a few seconds on a cold Render instance.
-        try:
-            result = await asyncio.wait_for(asyncio.to_thread(_extract), timeout=120)
-        except Exception as exc:
-            # Optional last-resort Yuki API. This is only used when the user
-            # has configured MEOW_API_KEY and a direct video ID is available.
-            if not video and API_KEY and API_KEY != "YOUR_API_KEY":
-                vid = _extract_video_id(target)
-                if vid:
-                    try:
-                        path = await download_media(vid, is_video=False)
-                        if os.path.exists(path) and os.path.getsize(path) > 10000:
-                            title = f"YouTube Audio ({vid})"
-                            details = await _fetch_oembed(vid)
-                            if details:
-                                title = details.get("title") or title
-                            result = {
-                                "id": vid,
-                                "title": title,
-                                "link": f"https://www.youtube.com/watch?v={vid}",
-                                "duration": 0,
-                                "duration_string": "",
-                                "thumbnails": [{"url": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"}],
-                                "stream_url": path,
-                            }
-                        else:
-                            raise RuntimeError("Yuki returned an empty audio file")
-                    except Exception as yuki_exc:
-                        raise RuntimeError(
-                            f"{exc} | Yuki fallback failed: {yuki_exc}"
-                        ) from exc
-                else:
-                    raise
-            else:
-                raise
-
+        result = await asyncio.wait_for(asyncio.to_thread(_extract), timeout=35)
         if len(_RESOLVE_CACHE) >= _RESOLVE_CACHE_MAX:
             oldest = min(_RESOLVE_CACHE, key=lambda k: _RESOLVE_CACHE[k][0])
             _RESOLVE_CACHE.pop(oldest, None)

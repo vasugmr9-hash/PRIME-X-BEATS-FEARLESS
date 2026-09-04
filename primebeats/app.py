@@ -18,13 +18,6 @@ from .approvals import ApprovalStore
 from .library import LibraryStore
 from .features import FEATURES, EFFECT_ALIASES
 
-# Render captures stdout/stderr reliably. Configure the application logger here so
-# playback tracebacks are never silently swallowed by an unconfigured logger.
-logging.basicConfig(
-    level=getattr(logging, __import__("os").environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    force=True,
-)
 log=logging.getLogger("primebeats")
 
 class StyledClient(Client):
@@ -44,23 +37,6 @@ class StyledClient(Client):
 
 async def maybe(value):
     return await value if inspect.isawaitable(value) else value
-
-
-def _exception_text(exc: BaseException, limit: int = 3000) -> str:
-    """Return a Telegram-safe diagnostic without exposing configured secrets."""
-    import traceback as _traceback
-    text = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
-    # Never echo common credential-bearing environment values into Telegram.
-    import os as _os
-    for key in (
-        "BOT_TOKEN", "API_HASH", "ASSISTANT_SESSION", "MEOW_API_KEY",
-        "YOUTUBE_COOKIES_FILE", "BGUTIL_POT_PROVIDER_URL"
-    ):
-        value = _os.environ.get(key)
-        if value:
-            text = text.replace(value, f"<{key}>")
-    return text[-limit:]
-
 
 class PrimeBeats:
     def __init__(self):
@@ -123,7 +99,7 @@ class PrimeBeats:
         pre = f"-ss {max(0.0, float(start_at)):.3f}" if start_at > 0 else ""
         post = f"-af {ff}" if ff else ""
         if pre or post:
-            ffmpeg = (pre + " " + post).strip()
+            ffmpeg = (pre + " -atmid " + post).strip()
         kwargs = {}
         if ffmpeg:
             kwargs["ffmpeg_parameters"] = ffmpeg
@@ -218,72 +194,30 @@ class PrimeBeats:
             await asyncio.wait_for(maybe(self.calls.leave_call(chat_id)), timeout=5)
 
     async def stream(self,chat_id,track,video=False,effect=None,start_at:float=0.0,refresh=False):
-        """Start one media stream with explicit diagnostics and safe state rollback."""
+        """Start a PyTgCalls stream. Reuse an already-resolved direct URL for fast first play."""
         p=self.store.get(chat_id)
         old_state=(p.current,p.paused,p.muted,p.video,p.effect,p.started_at)
         fresh=track
-
+        if refresh or not getattr(track,"stream_url",None):
+            fresh=await asyncio.wait_for(resolve(track.webpage_url,track.requested_by,video),timeout=35)
+        await self._ensure_voice_chat(chat_id)
+        effect_key=effect or getattr(p,"effect","normal")
+        speed=float(getattr(p,"speed",1.0))
+        ff=self._audio_filter(effect_key,speed)
+        fresh.stream_url = fresh.stream_url or track.stream_url
+        media=self._make_media(fresh,video,effect_key,speed,start_at)
         try:
-            if refresh or not getattr(track,"stream_url",None):
-                log.info("stream: resolving source chat=%s title=%r",chat_id,getattr(track,"title",""))
-                fresh=await asyncio.wait_for(
-                    resolve(track.webpage_url,track.requested_by,video),
-                    timeout=150
-                )
-
-            if not getattr(fresh,"stream_url",None):
-                raise RuntimeError("YouTube resolver returned no direct media URL.")
-
-            source = str(fresh.stream_url).strip()
-            if not source.startswith(("http://", "https://", "/", "./")):
-                raise RuntimeError(
-                    f"Invalid media source returned by resolver: {source[:300]}"
-                )
-
-            await self._ensure_voice_chat(chat_id)
-
-            effect_key=effect or getattr(p,"effect","normal")
-            speed=float(getattr(p,"speed",1.0))
-            fresh.stream_url = fresh.stream_url or track.stream_url
-            media=self._make_media(fresh,video,effect_key,speed,start_at)
-
-            log.info(
-                "stream: calling PyTgCalls.play chat=%s video=%s effect=%s",
-                chat_id, bool(video), effect_key
-            )
-            result=await asyncio.wait_for(
-                maybe(self.calls.play(chat_id,media)),
-                timeout=35
-            )
-            log.info("stream: PyTgCalls.play returned chat=%s result=%r",chat_id,result)
-
-            with suppress(Exception):
-                await maybe(self.calls.change_volume_call(chat_id,p.volume))
-
-        except asyncio.TimeoutError as exc:
-            p.current,p.paused,p.muted,p.video,p.effect,p.started_at=old_state
-            log.exception("STREAM TIMEOUT chat=%s",chat_id)
-            raise RuntimeError(
-                "Voice-chat stream timed out after 35 seconds. "
-                "The assistant/VC engine did not accept the media."
-            ) from exc
+            await asyncio.wait_for(maybe(self.calls.play(chat_id,media)), timeout=35)
+            with suppress(Exception): await maybe(self.calls.change_volume_call(chat_id,p.volume))
         except Exception:
+            # Do not leave the player pointing at a stream that never started.
             p.current,p.paused,p.muted,p.video,p.effect,p.started_at=old_state
-            log.exception("STREAM START FAILED chat=%s",chat_id)
             raise
-
-        track.stream_url=fresh.stream_url
-        track.title=fresh.title
-        track.duration=fresh.duration
-        track.thumbnail=fresh.thumbnail
+        track.stream_url=fresh.stream_url; track.title=fresh.title; track.duration=fresh.duration; track.thumbnail=fresh.thumbnail
         track.video=bool(video)
-        p.current=track
-        p.paused=False
-        p.muted=False
-        p.video=bool(video)
-        p.effect=effect_key
+        p.current=track; p.paused=False; p.muted=False; p.video=bool(video); p.effect=effect_key
         p.started_at=time.monotonic()-max(0.0,float(start_at))
-        self._arm_end_watchdog(chat_id,track)
+        self._arm_end_watchdog(chat_id, track)
 
     async def _restart_current(self,chat_id,position:float|None=None):
         """Rebuild the current media source without leaving the Telegram VC.
@@ -297,7 +231,7 @@ class PrimeBeats:
         pos=0.0 if position is None else max(0.0,float(position))
         if target.duration: pos=min(pos,max(0.0,target.duration-0.5))
         self._cancel_end_watchdog(chat_id)
-        fresh=await asyncio.wait_for(resolve(target.webpage_url,target.requested_by,getattr(target,"video",p.video)),timeout=150)
+        fresh=await asyncio.wait_for(resolve(target.webpage_url,target.requested_by,getattr(target,"video",p.video)),timeout=35)
         fresh.video=getattr(target,"video",p.video)
         media=self._make_media(fresh,getattr(target,"video",p.video),p.effect,float(getattr(p,"speed",1.0)),pos)
         change=getattr(self.calls,"change_stream",None)
@@ -492,7 +426,7 @@ class PrimeBeats:
             await m.reply_text(f"🎧 <b>Usage:</b> <code>/{'vplay' if video else 'play'} &lt;song or YouTube URL&gt;</code>");return
         msg=await m.reply_text("<b>╭━━〔 ⚡ PRIME SEARCH 〕━━╮</b>\n┃ 🔎 Searching YouTube...\n┃ 🧠 Resolving direct media...\n┃ 🎙 Auto-starting Voice Chat...\n┃ 🚀 Preparing VC stream...\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>")
         try:
-            track=await asyncio.wait_for(resolve(query,self._requester_name(m.from_user),video),timeout=150)
+            track=await asyncio.wait_for(resolve(query,self._requester_name(m.from_user),video),timeout=40)
             track.video=bool(video)
             await msg.edit_text(f"<b>╭━━〔 ⚡ PRIME × BEATS 〕━━╮</b>\n┃ 🎵 <b>{track.title[:80]}</b>\n┃ 🎙 Voice Chat: <b>STARTING</b>\n┃ ⚡ Assistant: <b>CONNECTING</b>\n┃ 🚀 Stream: <b>READY</b>\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>")
             p=self.store.get(m.chat.id)
@@ -506,16 +440,9 @@ class PrimeBeats:
             await msg.delete()
             await self._announce_track(m.chat.id,track,p)
         except Exception as e:
-            log.exception("PLAY FAILED chat=%s query=%r",m.chat.id,query)
-            diagnostic=esc(_exception_text(e,2800))
-            await msg.edit_text(
-                "⚝ 𝐅ᴇᴀʀʟᴇss ꭗ 𝐌ᴜsɪᴄ ᯤ\\n\\n"
-                "🚀 ᴘᴏᴡᴇʀғᴜʟ • ғᴀsᴛ • sᴛᴀʙʟᴇ\\n"
-                "❏ <b>ᴘʟᴀʏʙᴀᴄᴋ ғᴀɪʟᴇᴅ</b>\\n\\n"
-                "<b>🔎 REAL ERROR:</b>\\n"
-                "<pre>"+diagnostic+"</pre>\\n\\n"
-                "<i>The complete traceback is also printed to Render logs.</i>"
-            )
+            log.exception("play failed: chat=%s query=%r",m.chat.id,query)
+            safe=esc(str(e))[:500]
+            await msg.edit_text("⚝ 𝐅ᴇᴀʀʟᴇss ꭗ 𝐌ᴜsɪᴄ ᯤ\n\n🚀 ᴘᴏᴡᴇʀғᴜʟ • ғᴀsᴛ • sᴛᴀʙʟᴇ\n❏ <b>ᴘʟᴀʏʙᴀᴄᴋ ғᴀɪʟᴇᴅ</b>\n\n<code>"+safe+"</code>\n\n<blockquote>PRIME × BEATS could not start the assistant stream. Check Render logs for the full traceback.</blockquote>")
 
     async def reapply_effect(self,chat_id,effect):
         p=self.store.get(chat_id)
@@ -574,31 +501,6 @@ class PrimeBeats:
                 await m.reply_text("Use <code>/revoke_gc</code> inside the group/channel.");return
             await self.approvals.revoke(m.chat.id)
             await m.reply_text("🔒 <b>GROUP LOCKED AGAIN.</b>\n\n⚡ Run <code>/approvegc</code> again to unlock it.")
-        @self.bot.on_message(filters.command("vcdebug"))
-        async def vcdebug(_,m):
-            if not await self.require_admin(m):
-                return
-            status=await m.reply_text("🔎 <b>VC DIAGNOSTICS</b>\\nChecking assistant + PyTgCalls...")
-            try:
-                me=await self.assistant.get_me()
-                approved=self.approvals.is_approved(m.chat.id)
-                await self._ensure_voice_chat(m.chat.id)
-                await status.edit_text(
-                    "🟢 <b>VC DIAGNOSTICS PASSED</b>\\n\\n"
-                    f"🤖 Assistant: <code>@{esc(me.username or me.first_name or 'unknown')}</code>\\n"
-                    f"🆔 Assistant ID: <code>{me.id}</code>\\n"
-                    f"🔐 Approved: <code>{'YES' if approved else 'NO'}</code>\\n"
-                    "🎙 Voice Chat: <code>AVAILABLE</code>\\n"
-                    "⚙️ PyTgCalls: <code>STARTED</code>"
-                )
-            except Exception as e:
-                log.exception("VC DIAGNOSTICS FAILED chat=%s",m.chat.id)
-                await status.edit_text(
-                    "🔴 <b>VC DIAGNOSTICS FAILED</b>\\n\\n<pre>"+
-                    esc(_exception_text(e,3000))+
-                    "</pre>"
-                )
-
         @self.bot.on_message(filters.command("joinvc"))
         async def joinvc(_,m):
             if not await self.require_admin(m): return
@@ -710,7 +612,6 @@ class PrimeBeats:
                     p.clear(); p.current=None; p.autoplay=False; p.autoplay_topic=""; p.autoplay_seen.clear()
                     with suppress(Exception):
                         await asyncio.wait_for(maybe(self.calls.leave_call(m.chat.id)), timeout=5)
-                    await m.reply_text("⏹ <b>PLAYBACK STOPPED</b>\n\n🛑 Current song and queue have been cleared.\n🎙 Voice Chat playback has been stopped.\n\n▶️ Use <code>/play song</code> to start again.", reply_markup=player_keyboard())
                 elif action=="shuffle":p.shuffle()
                 elif action=="loop":p.loop=not p.loop
                 elif action=="mute":await maybe(self.calls.mute(m.chat.id));p.muted=True
@@ -766,26 +667,6 @@ class PrimeBeats:
         for cmd,action in [("pause","pause"),("resume","resume"),("stop","stop"),("shuffle","shuffle"),("loop","loop"),("mute","mute"),("unmute","unmute"),("voldown","voldown"),("volup","volup"),("clear","clear"),("clearqueue","clear")]:
             async def handler(_,m,a=action): await control(m,a)
             self.bot.on_message(filters.command(cmd))(handler)
-        @self.bot.on_message(filters.command("nleft"))
-        async def nleft(_,m):
-            p=self.store.get(m.chat.id)
-            t=p.current
-            if not t or not getattr(t,"duration",0) or not getattr(p,"started_at",0):
-                await m.reply_text("⏳ <b>NO ACTIVE SONG</b>\n\n🎵 Nothing is currently playing.")
-                return
-            elapsed=max(0.0,time.monotonic()-p.started_at)
-            remaining=max(0,int(round(float(t.duration)-elapsed)))
-            if p.paused:
-                state="⏸️ Paused"
-            else:
-                state="▶️ Playing"
-            await m.reply_text(
-                f"⏳ <b>TIME LEFT</b>\n\n🎵 <b>{esc(t.title)}</b>\n"
-                f"{state}\n⏱️ Remaining: <code>{duration(remaining)}</code>\n"
-                f"⌛ Total: <code>{duration(t.duration)}</code>",
-                reply_markup=player_keyboard()
-            )
-
         @self.bot.on_message(filters.command("queue"))
         async def queue(_,m):
             p=self.store.get(m.chat.id)
@@ -1360,28 +1241,15 @@ class PrimeBeats:
         if not self.approvals.is_approved(q.message.chat.id):await q.answer("Owner approval required.",show_alert=True);return False
         return True
     async def run(self):
-        log.info("starting PRIME × BEATS services")
-        await self.bot.start()
-        await self.assistant.start()
-
-        me=await self.assistant.get_me()
-        log.info(
-            "assistant connected: id=%s username=@%s name=%s",
-            me.id, me.username or "", me.first_name or ""
-        )
-
-        # Do not suppress this. If PyTgCalls fails here, /play can never work.
+        await self.bot.start();await self.assistant.start()
         try:
-            await maybe(self.calls.start())
-        except Exception as exc:
-            log.exception("FATAL: PyTgCalls failed to start")
-            raise RuntimeError(
-                "PyTgCalls could not start. Check py-tgcalls/ntgcalls compatibility "
-                "and the assistant session."
-            ) from exc
-
-        log.info("PyTgCalls engine started successfully")
-
+            me=await self.assistant.get_me()
+            log.info("assistant connected: id=%s username=@%s name=%s",me.id,me.username or "",me.first_name or "")
+            if int(me.id)!=8547061213:
+                log.error("ASSISTANT_SESSION belongs to a different Telegram account: expected 8547061213, got %s",me.id)
+        except Exception:
+            log.exception("could not verify assistant identity")
+        with suppress(Exception):await maybe(self.calls.start())
         self.web_runner=await start_web(self.cfg.port,self.bot)
         log.info("PRIME × BEATS FEARLESS FINAL HARDENED online")
         await asyncio.Event().wait()
@@ -1391,22 +1259,3 @@ class PrimeBeats:
         with suppress(Exception):await self.assistant.stop()
         with suppress(Exception):await self.bot.stop()
         if self.web_runner:await self.web_runner.cleanup()
-
-# ──────────────────────────────────────────────────────────────
-# Process entrypoint
-# The bot must be launched as a package with:
-#     python -m primebeats.app
-# Keep the asyncio loop alive through PrimeBeats.run().
-# ──────────────────────────────────────────────────────────────
-async def _main():
-    app = PrimeBeats()
-    try:
-        await app.run()
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
-    finally:
-        await app.shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(_main())
