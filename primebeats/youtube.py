@@ -6,11 +6,10 @@ import urllib.parse
 from typing import Union
 
 import aiohttp
-from py_yt import VideosSearch, Playlist
 
 API_URL = os.environ.get("MEOW_API_URL", "https://music.yukiapi.site")
 
-API_KEY = os.environ.get("MEOW_API_KEY", "YOUR_API_KEY") ## Get This API KEY FROM TELEGRAM BOT USERNAME: @MeowApiRobot
+API_KEY = os.environ.get("MEOW_API_KEY", "yuki_f13c54a24cae79023a43f41e794a3dfc") ## Get This API KEY FROM TELEGRAM BOT USERNAME: @MeowApiRobot
 DOWNLOAD_DIR = "downloads"
 
 _global_session: aiohttp.ClientSession | None = None
