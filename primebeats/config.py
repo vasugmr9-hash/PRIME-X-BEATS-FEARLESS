@@ -47,4 +47,5 @@ class Config:
             env_int("SUPPORT_CHANNEL_ID",-1003809899413),
             env_int("OFFICIAL_CHANNEL_ID",-1003587739198),
             max(4,min(20,env_int("DISCOVERY_BATCH",10))), max(10,min(100,env_int("PLAYLIST_LIMIT",50))),
-        )
+    )
+        
