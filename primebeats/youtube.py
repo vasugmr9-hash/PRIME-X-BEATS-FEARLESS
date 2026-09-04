@@ -3,10 +3,15 @@ import os
 import random
 import re
 import urllib.parse
+import time
 from typing import Union
 
 import aiohttp
-from py_yt import VideosSearch, Playlist
+
+# py_yt is intentionally not required.
+# YouTube search/resolution is handled by yt-dlp.
+VideosSearch = None
+Playlist = None
 
 API_URL = os.environ.get("MEOW_API_URL", "https://music.yukiapi.site")
 
