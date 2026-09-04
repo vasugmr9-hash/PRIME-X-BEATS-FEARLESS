@@ -492,7 +492,10 @@ class PrimeBeats:
             await m.reply_text(f"🎧 <b>Usage:</b> <code>/{'vplay' if video else 'play'} &lt;song or YouTube URL&gt;</code>");return
         msg=await m.reply_text("<b>╭━━〔 ⚡ PRIME SEARCH 〕━━╮</b>\n┃ 🔎 Searching YouTube...\n┃ 🧠 Resolving direct media...\n┃ 🎙 Auto-starting Voice Chat...\n┃ 🚀 Preparing VC stream...\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>")
         try:
-            track=await asyncio.wait_for(resolve(query,self._requester_name(m.from_user),video),timeout=40)
+            track=await asyncio.wait_for(
+    resolve(query, self._requester_name(m.from_user), video),
+    timeout=90
+            )
             track.video=bool(video)
             await msg.edit_text(f"<b>╭━━〔 ⚡ PRIME × BEATS 〕━━╮</b>\n┃ 🎵 <b>{track.title[:80]}</b>\n┃ 🎙 Voice Chat: <b>STARTING</b>\n┃ ⚡ Assistant: <b>CONNECTING</b>\n┃ 🚀 Stream: <b>READY</b>\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>")
             p=self.store.get(m.chat.id)
