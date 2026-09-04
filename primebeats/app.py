@@ -10,7 +10,7 @@ from pytgcalls.types import MediaStream, AudioQuality, VideoQuality, GroupCallPa
 from .config import Config
 from .state import PlayerStore, Track
 from .youtube import resolve, resolve_playlist, search_results, duration, topic_seeds, discover_topic
-from .ui import home_keyboard, player_keyboard, effects_keyboard, welcome, player_text, help_text, links, esc
+from .ui import home_keyboard, player_keyboard, effects_keyboard, welcome, player_text, help_text, links, esc, style_text
 from .effects import EFFECTS
 from .web import start_web
 from .clone import CloneManager
@@ -19,6 +19,21 @@ from .library import LibraryStore
 from .features import FEATURES, EFFECT_ALIASES
 
 log=logging.getLogger("primebeats")
+
+class StyledClient(Client):
+    """Bot client that applies the FEARLESS typography to all normal bot text."""
+    @staticmethod
+    def _styled(value):
+        return style_text(value) if isinstance(value, str) else value
+
+    async def send_message(self, chat_id, text=None, *args, **kwargs):
+        return await super().send_message(chat_id, self._styled(text), *args, **kwargs)
+
+    async def edit_message_text(self, chat_id, message_id, text, *args, **kwargs):
+        return await super().edit_message_text(chat_id, message_id, self._styled(text), *args, **kwargs)
+
+    async def send_photo(self, chat_id, photo, caption=None, *args, **kwargs):
+        return await super().send_photo(chat_id, photo, caption=self._styled(caption), *args, **kwargs)
 
 async def maybe(value):
     return await value if inspect.isawaitable(value) else value
@@ -29,7 +44,7 @@ class PrimeBeats:
         self.store=PlayerStore(self.cfg.default_volume,self.cfg.autoplay_default)
         self.approvals=ApprovalStore()
         self.library=LibraryStore()
-        self.bot=Client("prime_x_beats_bot",api_id=self.cfg.api_id,api_hash=self.cfg.api_hash,bot_token=self.cfg.bot_token)
+        self.bot=StyledClient("prime_x_beats_bot",api_id=self.cfg.api_id,api_hash=self.cfg.api_hash,bot_token=self.cfg.bot_token)
         self.assistant=Client("prime_x_beats_assistant",api_id=self.cfg.api_id,api_hash=self.cfg.api_hash,session_string=self.cfg.assistant_session)
         self.calls=PyTgCalls(self.assistant)
         self.clone=CloneManager(self.cfg.api_id,self.cfg.api_hash,self.cfg.owner_id)
@@ -86,11 +101,40 @@ class PrimeBeats:
         extra=self._atempo_chain(speed)
         return f"{base},{extra}" if base and extra else (base or extra)
 
-    async def stream(self,chat_id,track,video=False,effect=None,start_at:float=0.0):
-        """Resolve and start a stream, committing player state only after play succeeds."""
+    async def _ensure_voice_chat(self, chat_id: int):
+        """Create the group voice chat automatically using the assistant user account.
+
+        Telegram only allows users (not Bot API identities) to create a group call, so
+        the assistant session performs this operation. If a call already exists, that
+        is treated as success and PyTgCalls will join it.
+        """
+        try:
+            from pyrogram.raw.functions.phone import CreateGroupCall
+            peer = await self.assistant.resolve_peer(chat_id)
+            await self.assistant.invoke(
+                CreateGroupCall(
+                    peer=peer,
+                    random_id=secrets.randbits(31),
+                    title=f"{self.cfg.bot_name} • Music",
+                )
+            )
+            log.info("voice chat created automatically: chat=%s", chat_id)
+            return True
+        except Exception as e:
+            text = str(e).upper()
+            if "GROUPCALL_ALREADY_EXISTS" in text:
+                return True
+            log.exception("could not create voice chat automatically: chat=%s", chat_id)
+            raise
+
+    async def stream(self,chat_id,track,video=False,effect=None,start_at:float=0.0,refresh=False):
+        """Start a PyTgCalls stream. Reuse an already-resolved direct URL for fast first play."""
         p=self.store.get(chat_id)
         old_state=(p.current,p.paused,p.muted,p.video,p.effect,p.started_at)
-        fresh=await resolve(track.webpage_url,track.requested_by,video)
+        fresh=track
+        if refresh or not getattr(track,"stream_url",None):
+            fresh=await asyncio.wait_for(resolve(track.webpage_url,track.requested_by,video),timeout=35)
+        await self._ensure_voice_chat(chat_id)
         effect_key=effect or getattr(p,"effect","normal")
         speed=float(getattr(p,"speed",1.0))
         ff=self._audio_filter(effect_key,speed)
@@ -124,7 +168,7 @@ class PrimeBeats:
         if target.duration: pos=min(pos,max(0.0,target.duration-0.5))
         with suppress(Exception): await asyncio.wait_for(maybe(self.calls.leave_call(chat_id)),timeout=5)
         await asyncio.sleep(0.20)
-        await self.stream(chat_id,target,getattr(target,"video",p.video),p.effect,pos)
+        await self.stream(chat_id,target,getattr(target,"video",p.video),p.effect,pos,refresh=True)
         return True
 
     async def _autofill(self, chat_id, minimum=8):
@@ -193,10 +237,11 @@ class PrimeBeats:
     async def handle_play(self,m,query,video=False):
         if not query:
             await m.reply_text(f"🎧 <b>Usage:</b> <code>/{'vplay' if video else 'play'} &lt;song or YouTube URL&gt;</code>");return
-        msg=await m.reply_text("╭━━〔 ⚡ PRIME SEARCH 〕━━╮\n┃ 🔎 Searching...\n┃ 🧠 Resolving media...\n┃ 🚀 Preparing VC stream...\n╰━━━━━━━━━━━━━━━━━━━━╯")
+        msg=await m.reply_text("<b>╭━━〔 ⚡ PRIME SEARCH 〕━━╮</b>\n┃ 🔎 Searching YouTube...\n┃ 🧠 Resolving direct media...\n┃ 🎙 Auto-starting Voice Chat...\n┃ 🚀 Preparing VC stream...\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>")
         try:
-            track=await resolve(query,m.from_user.mention if m.from_user else "Unknown",video)
+            track=await asyncio.wait_for(resolve(query,m.from_user.mention if m.from_user else "Unknown",video),timeout=40)
             track.video=bool(video)
+            await msg.edit_text(f"<b>╭━━〔 ⚡ PRIME × BEATS 〕━━╮</b>\n┃ 🎵 <b>{track.title[:80]}</b>\n┃ 🎙 Voice Chat: <b>STARTING</b>\n┃ ⚡ Assistant: <b>CONNECTING</b>\n┃ 🚀 Stream: <b>READY</b>\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>")
             p=self.store.get(m.chat.id)
             # Serialize concurrent play requests for this chat so two commands cannot
             # both observe an empty player and race the native VC engine.
@@ -215,8 +260,9 @@ class PrimeBeats:
             else:
                 await msg.edit_text(caption,reply_markup=player_keyboard())
         except Exception as e:
-            log.warning("play failed: %s",e)
-            await msg.edit_text("❌ <b>Media start failed.</b>\n\nCheck that the VC is active and the assistant has <b>Manage Video Chats</b> permission.\nTry <code>/play</code> again after fixing VC permissions.")
+            log.exception("play failed: chat=%s query=%r",m.chat.id,query)
+            safe=esc(str(e))[:500]
+            await msg.edit_text("⚝ 𝐅ᴇᴀʀʟᴇss ꭗ 𝐌ᴜsɪᴄ ᯤ\n\n🚀 ᴘᴏᴡᴇʀғᴜʟ • ғᴀsᴛ • sᴛᴀʙʟᴇ\n❏ <b>ᴘʟᴀʏʙᴀᴄᴋ ғᴀɪʟᴇᴅ</b>\n\n<code>"+safe+"</code>\n\n<blockquote>PRIME × BEATS could not start the assistant stream. Check Render logs for the full traceback.</blockquote>")
 
     async def reapply_effect(self,chat_id,effect):
         p=self.store.get(chat_id)
@@ -249,6 +295,17 @@ class PrimeBeats:
             if not await self.owner_only(m):return
             await self.approvals.revoke(m.chat.id)
             await m.reply_text("🔒 <b>GROUP LOCKED AGAIN.</b>")
+        @self.bot.on_message(filters.command("joinvc"))
+        async def joinvc(_,m):
+            if not await self.require_admin(m): return
+            status=await m.reply_text("<b>╭━━〔 🎙 PRIME VC 〕━━╮</b>\n┃ ⚡ Assistant is starting the Voice Chat...\n┃ 🔐 Checking admin access...\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>")
+            try:
+                await self._ensure_voice_chat(m.chat.id)
+                await status.edit_text("<b>╭━━〔 🟢 PRIME VC ONLINE 〕━━╮</b>\n┃ 🎙 Voice Chat: <b>ACTIVE</b>\n┃ 🤖 Assistant: <b>READY</b>\n┃ 🎧 Use <code>/play song</code>\n┃ 🎥 Use <code>/vplay video</code>\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>",reply_markup=player_keyboard())
+            except Exception as e:
+                log.exception("joinvc failed: chat=%s",m.chat.id)
+                await status.edit_text("❌ <b>Could not start Voice Chat</b>\n\n<code>"+esc(str(e))[:500]+"</code>")
+
         @self.bot.on_message(filters.command("play"))
         async def play(_,m):
             if m.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL): await m.reply_text("❌ Add me to a group first.");return
@@ -546,7 +603,7 @@ class PrimeBeats:
         @self.bot.on_message(filters.command("clone"))
         async def clone(_,m):
             if not await self.owner_only(m):return
-            await m.reply_text("🧬 <b>CLONE SETUP</b>\n\nSend the <b>Bot API token</b> in this private chat only.\n⚠️ Never post a token in a group. The bot never asks for your phone number or Telegram login OTP.")
+            await m.reply_text("⚝ 𝐅ᴇᴀʀʟᴇss ꭗ 𝐌ᴜsɪᴄ ᯤ\n\n🚀 ᴘᴏᴡᴇʀғᴜʟ • ғᴀsᴛ • sᴛᴀʙʟᴇ\n❏ 🧬 <b>ᴄʟᴏɴᴇ sᴇᴛᴜᴘ</b>\n\nSend the <b>Bot API token</b> in this private chat only.\n⚠️ Never post a token in a group. The bot never asks for your phone number or Telegram login OTP.")
             self._clone_waiting.add(m.from_user.id)
         @self.bot.on_message(filters.private & filters.text & ~filters.command("clone"))
         async def private_text(_,m):
@@ -555,8 +612,8 @@ class PrimeBeats:
                 with suppress(Exception): await m.delete()
                 try:
                     me=await self.clone.create(token)
-                    await m.reply_text(f"🧬 <b>CLONE ONLINE</b>\n\n🤖 @{me.username or me.first_name}\n🟢 Status: <code>ONLINE</code>")
-                except Exception:await m.reply_text("❌ Clone failed. Check the Bot API token.")
+                    await m.reply_text(f"⚝ 𝐅ᴇᴀʀʟᴇss ꭗ 𝐌ᴜsɪᴄ ᯤ\n\n🚀 ᴘᴏᴡᴇʀғᴜʟ • ғᴀsᴛ • sᴛᴀʙʟᴇ\n❏ 🧬 <b>ᴄʟᴏɴᴇ ᴏɴʟɪɴᴇ</b>\n\n🤖 @{me.username or me.first_name}\n🟢 Status: <code>ONLINE</code>")
+                except Exception:await m.reply_text("⚝ 𝐅ᴇᴀʀʟᴇss ꭗ 𝐌ᴜsɪᴄ ᯤ\n🚀 ᴘᴏᴡᴇʀғᴜʟ • ғᴀsᴛ • sᴛᴀʙʟᴇ\n❏ ❌ ᴄʟᴏɴᴇ ғᴀɪʟᴇᴅ — ᴄʜᴇᴄᴋ ʏᴏᴜʀ ᴛᴏᴋᴇɴ.")
         @self.bot.on_message(filters.command("clones"))
         async def clones(_,m):
             if await self.owner_only(m):await m.reply_text(f"🧬 Running clones: <code>{len(self.clone.clients)}</code>")
@@ -762,6 +819,15 @@ class PrimeBeats:
                     await q.answer("Could not play that result",show_alert=True)
             elif data=="ping":
                 t=time.perf_counter(); await q.answer(f"Telegram callback: {(time.perf_counter()-t)*1000:.0f} ms ⚡")
+            elif data=="startvc":
+                if not await self.callback_admin(q):return
+                try:
+                    await self._ensure_voice_chat(chat)
+                    await q.answer("Voice Chat is online ⚡")
+                    await q.message.edit_text("<b>╭━━〔 🟢 PRIME VC ONLINE 〕━━╮</b>\n┃ 🎙 Assistant is connected\n┃ 🎧 Ready for /play\n┃ 🎥 Ready for /vplay\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>",reply_markup=player_keyboard())
+                except Exception as e:
+                    log.exception("startvc callback failed: chat=%s",chat)
+                    await q.answer("Could not start Voice Chat",show_alert=True)
             elif data=="help":await q.message.edit_text(help_text(self.cfg.bot_name),reply_markup=home_keyboard(self.cfg))
             elif data=="help:play":await q.answer("Use /play <song name>",show_alert=True)
             elif data=="now":await q.message.edit_text(player_text(p,self.cfg.bot_name),reply_markup=player_keyboard()); await q.answer("Player refreshed ⚡")
@@ -882,7 +948,7 @@ class PrimeBeats:
         @self.bot.on_message(filters.service)
         async def vc_service(_,m):
             if getattr(m,"video_chat_started",None) is not None:
-                await m.reply_text("<b>╭━━〔 🎙 VC ONLINE 〕━━╮</b>\n┃ 🟢 PRIME × BEATS is ready\n┃ 🎧 <code>/play &lt;song&gt;</code>\n┃ 🎥 <code>/vplay &lt;video&gt;</code>\n┃ ♾️ <code>/autoplay &lt;topic&gt;</code>\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>\n\n<blockquote>⚡ Assistant needs <b>Manage Video Chats</b> permission.</blockquote>")
+                await m.reply_text("<b>╭━━〔 🟢 VC ONLINE 〕━━╮</b>\n┃ ⚡ PRIME × BEATS detected the Voice Chat\n┃ 🎧 <code>/play &lt;song&gt;</code>\n┃ 🎥 <code>/vplay &lt;video&gt;</code>\n┃ ♾️ <code>/autoplay &lt;topic&gt;</code>\n<b>╰━━━━━━━━━━━━━━━━━━━━╯</b>")
             elif getattr(m,"video_chat_ended",None) is not None:
                 await m.reply_text("<b>🔴 VOICE CHAT ENDED</b>\n\n🧹 Playback session closed safely.\n♾ Autoplay will resume when a new VC is started and a queue/topic remains.")
     async def _control_callback(self,m,action,p):
