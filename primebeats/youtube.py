@@ -15,7 +15,7 @@ except ImportError:  # mirror package name used by the project
 from .state import Track
 
 API_URL = os.environ.get("MEOW_API_URL", "https://music.yukiapi.site").rstrip("/")
-API_KEY = os.environ.get("MEOW_API_KEY", "")
+API_KEY = os.environ.get("MEOW_API_KEY", "yuki_f13c54a24cae79023a43f41e794a3dfc")
 
 # One Yuki client is shared for search/details/stream generation. Yuki documents
 # get_stream() specifically as a direct URL for PyTgCalls/FFmpeg, so playback does
