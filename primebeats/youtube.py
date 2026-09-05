@@ -2,14 +2,16 @@ import asyncio
 import os
 import random
 import re
+import shutil
 import urllib.parse
 from typing import Union
 
 import aiohttp
+from py_yt import VideosSearch, Playlist
 
 API_URL = os.environ.get("MEOW_API_URL", "https://music.yukiapi.site")
 
-API_KEY = os.environ.get("MEOW_API_KEY", "yuki_f13c54a24cae79023a43f41e794a3dfc") ## Get This API KEY FROM TELEGRAM BOT USERNAME: @MeowApiRobot
+API_KEY = os.environ.get("MEOW_API_KEY", "YOUR_API_KEY") ## Get This API KEY FROM TELEGRAM BOT USERNAME: @MeowApiRobot
 DOWNLOAD_DIR = "downloads"
 
 _global_session: aiohttp.ClientSession | None = None
@@ -140,6 +142,36 @@ async def _search_vercel(query: str, limit: int = 1) -> list[dict]:
 async def _search_one(query: str) -> dict | None:
     vid = _extract_video_id(query)
     if vid:
+        # Direct YouTube URLs used to fall back to oEmbed immediately, which has
+        # no duration field. Try the search providers first so /play and /vplay
+        # can display the real duration.
+        try:
+            vercel = await _search_vercel(vid, limit=1)
+            if vercel and vercel[0].get("id") == vid:
+                return vercel[0]
+        except Exception:
+            pass
+        try:
+            s = VideosSearch(vid, limit=1)
+            res = await s.next()
+            items = res.get("result", [])
+            if items:
+                r = items[0]
+                if r.get("id") == vid:
+                    thumb = (
+                        r["thumbnails"][0]["url"].split("?")[0]
+                        if r.get("thumbnails")
+                        else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                    )
+                    return {
+                        "id": vid,
+                        "title": r.get("title", f"YouTube Video ({vid})"),
+                        "link": r.get("link", f"https://www.youtube.com/watch?v={vid}"),
+                        "duration": r.get("duration", "0:00"),
+                        "thumbnails": [{"url": thumb}],
+                    }
+        except Exception:
+            pass
         oembed = await _fetch_oembed(vid)
         if oembed:
             return oembed
@@ -242,48 +274,98 @@ async def _search_many(query: str, limit: int = 10) -> list[dict]:
     return []
 
 
+async def _media_duration(path: str) -> int:
+    """Read the actual downloaded file duration when search metadata is missing."""
+    if not os.path.exists(path) or not shutil.which("ffprobe"):
+        return 0
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        return max(0, int(float(out.decode().strip()))) if out.strip() else 0
+    except Exception:
+        return 0
+
+
+async def _probe_media(path: str, require_video: bool) -> bool:
+    """Verify that the downloaded file really contains the requested media stream."""
+    if not os.path.exists(path) or os.path.getsize(path) < 10000:
+        return False
+    if not shutil.which("ffprobe"):
+        return True
+    wanted = "v:0" if require_video else "a:0"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", wanted,
+            "-show_entries", "stream=codec_type", "-of", "csv=p=0", path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        return proc.returncode == 0 and bool(out.strip())
+    except Exception:
+        return False
+
+
 async def download_media(video_id: str, is_video: bool = False) -> str:
     if not API_KEY or API_KEY == "YOUR_API_KEY":
         print("[Yuki API] Error: API_KEY is not set in environment or config.")
         raise RuntimeError("API_KEY missing. Please set MEOW_API_KEY in .env or get from @MeowApiRobot")
 
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    ext = "mp4" if is_video else "mp3"
     req_type = "video" if is_video else "audio"
-    out_path = os.path.join(DOWNLOAD_DIR, f"{video_id}.{ext}")
 
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
-        return out_path
-
+    # Telegram/PyTgCalls supports up to 720p for group-call video. Ask the
+    # provider for 720p first, then fall back if that exact quality is unavailable.
+    qualities = (720, 480, 360) if is_video else (360,)
     session = await get_session()
-    stream_url = f"{API_URL}/stream/{video_id}?key={API_KEY}&type={req_type}&quality=360"
+    last_error = None
 
-    tmp_path = f"{out_path}.tmp.{random.randint(1000, 9999)}"
-    try:
-        async with session.get(stream_url) as resp:
-            if resp.status == 200:
-                with open(tmp_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(65536):
-                        f.write(chunk)
+    for quality in qualities:
+        ext = "mp4" if is_video else "mp3"
+        suffix = f".video{quality}" if is_video else ""
+        out_path = os.path.join(DOWNLOAD_DIR, f"{video_id}{suffix}.{ext}")
 
-                if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 10000:
-                    os.replace(tmp_path, out_path)
-                    return out_path
-            elif resp.status == 401:
-                raise RuntimeError("Invalid API_KEY. Please get a valid key from @MeowApiRobot")
-    except Exception as e:
-        print(f"[Yuki API] Stream error for {video_id}: {e}")
-        raise
-    finally:
-        if os.path.exists(tmp_path):
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
+            if await _probe_media(out_path, is_video):
+                return out_path
             try:
-                os.remove(tmp_path)
+                os.remove(out_path)
             except OSError:
                 pass
 
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
-        return out_path
-    raise RuntimeError(f"Yuki API download failed for {video_id}")
+        stream_url = f"{API_URL}/stream/{video_id}?key={API_KEY}&type={req_type}&quality={quality}"
+        tmp_path = f"{out_path}.tmp.{random.randint(1000, 9999)}"
+        try:
+            print(f"[Yuki API] requesting {req_type} quality={quality} video_id={video_id}")
+            async with session.get(stream_url) as resp:
+                if resp.status == 200:
+                    with open(tmp_path, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(65536):
+                            f.write(chunk)
+                    if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 10000:
+                        os.replace(tmp_path, out_path)
+                        if await _probe_media(out_path, is_video):
+                            print(f"[Yuki API] ready: {out_path}")
+                            return out_path
+                        last_error = "provider returned a file without the requested media stream"
+                elif resp.status == 401:
+                    raise RuntimeError("Invalid API_KEY. Please get a valid key from @MeowApiRobot")
+                else:
+                    last_error = f"HTTP {resp.status}"
+        except Exception as e:
+            last_error = str(e)
+            print(f"[Yuki API] Stream error for {video_id} quality={quality}: {e}")
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    raise RuntimeError(f"Yuki API {req_type} download failed for {video_id}: {last_error or 'unknown error'}")
 
 
 class YouTubeAPI:
@@ -569,12 +651,15 @@ async def resolve(link_or_query: str, requested_by: str = "Unknown",
     # Download once here. download_media() has a persistent per-video cache,
     # so subsequent resolve() calls do not redownload the same media.
     media_path = await download_media(info["id"], is_video=bool(video))
+    actual_duration = await _media_duration(media_path)
+    metadata_duration = _seconds(info.get("duration"))
+    resolved_duration = actual_duration or metadata_duration
 
     # Track may be a dataclass with fixed fields, so set attributes safely.
     for name, value in (
         ("stream_url", media_path),
         ("title", info.get("title") or "Unknown"),
-        ("duration", _seconds(info.get("duration"))),
+        ("duration", resolved_duration),
         ("thumbnail", (info.get("thumbnails") or [{}])[0].get("url", "")),
         ("webpage_url", info.get("link")),
         ("video", bool(video)),
@@ -602,7 +687,7 @@ async def resolve_playlist(link: str, requested_by: str = "Unknown",
     return result
 
 
-async def duration(link_or_value) -> str:
+def duration(link_or_value) -> str:
     """Normalize duration to the format expected by the player UI."""
     if isinstance(link_or_value, (int, float)):
         sec = int(link_or_value)

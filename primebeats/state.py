@@ -11,7 +11,7 @@ class Player:
     queue:list[Track]=field(default_factory=list); current:Optional[Track]=None
     paused:bool=False; muted:bool=False; volume:int=100; loop:bool=False
     autoplay:bool=True; autoplay_topic:str=""; history:list[Track]=field(default_factory=list)
-    started_at:float=0.0; effect:str="normal"; video:bool=False; speed:float=1.0
+    started_at:float=0.0; paused_at:float=0.0; effect:str="normal"; video:bool=False; speed:float=1.0
     lock:asyncio.Lock=field(default_factory=asyncio.Lock)
     autoplay_round:int=0
     autoplay_seen:set[str]=field(default_factory=set)
