@@ -6,7 +6,6 @@ import urllib.parse
 from typing import Union
 
 import aiohttp
-from py_yt import VideosSearch, Playlist
 
 API_URL = os.environ.get("MEOW_API_URL", "https://music.yukiapi.site")
 
