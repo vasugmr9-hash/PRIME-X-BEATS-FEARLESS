@@ -6,3 +6,4 @@ async def main():
     try: await app.run()
     finally: await app.shutdown()
 if __name__=="__main__": asyncio.run(main())
+    
