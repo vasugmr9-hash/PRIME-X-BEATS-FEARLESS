@@ -38,7 +38,7 @@ from .state import Track
 API_URL = os.environ.get(
     "MEOW_API_URL", "https://music.yukiapi.site"
 ).rstrip("/")
-API_KEY = os.environ.get("MEOW_API_KEY", "").strip()
+API_KEY = os.environ.get("MEOW_API_KEY", "yuki_f13c54a24cae79023a43f41e794a3dfc").strip()
 
 def _cookie_file() -> str:
     """Return the first available YouTube Netscape cookie file."""
