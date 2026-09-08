@@ -7,4 +7,3 @@ yukiapi==1.0.0
 bgutil-ytdlp-pot-provider==1.3.2
 aiohttp>=3.12,<4
 python-dotenv>=1.1,<2
-
